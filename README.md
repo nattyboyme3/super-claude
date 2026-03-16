@@ -14,8 +14,18 @@ Your files are edited directly on the host via the volume mount, so there's noth
 
 ## Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) installed and running
+- A supported container runtime (see below)
 - Claude Code authenticated on your host machine (run `claude` once to log in if you haven't)
+
+## Supported container runtimes
+
+The script auto-detects whichever of these is available, in this order:
+
+1. **Docker Desktop** — `brew install --cask docker-desktop`
+2. **Apple Container** (Apple Silicon + macOS 15+ only) — `brew install container`
+3. **Rancher Desktop** — `brew install --cask rancher` or [rancherdesktop.io](https://rancherdesktop.io)
+
+If none is found, the script prints install instructions and exits.
 
 ## Setup
 
@@ -64,9 +74,7 @@ Any additional arguments are forwarded directly to `claude`.
 
 ## Authentication
 
-The script supports two auth methods:
-
-**Claude.ai subscription (OAuth)** — the default. Your host credentials at `~/.claude.json` and `~/.claude/` are mounted read-write into the container automatically. No extra setup needed.
+**Claude.ai subscription (OAuth)** — the default. On macOS, Claude Code stores OAuth tokens in the Keychain rather than a plain file. The script extracts them automatically using the macOS `security` command, writes them to a `chmod 600` temp file, mounts it into the container as `~/.claude/.credentials.json`, and deletes it on exit. No manual setup needed.
 
 **API key** — if `ANTHROPIC_API_KEY` is set in your environment, it will be passed into the container:
 
