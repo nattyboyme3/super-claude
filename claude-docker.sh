@@ -49,4 +49,22 @@ if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
   ARGS+=(-e ANTHROPIC_API_KEY)
 fi
 
+# On macOS, Claude Code stores OAuth credentials in the Keychain rather than
+# a file. Extract them to a temp file so the container can authenticate.
+CREDS_TMPFILE=""
+cleanup() {
+  [[ -n "$CREDS_TMPFILE" ]] && rm -f "$CREDS_TMPFILE"
+}
+trap cleanup EXIT
+
+if [[ "$(uname)" == "Darwin" ]]; then
+  CREDS_JSON="$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null || true)"
+  if [[ -n "$CREDS_JSON" ]]; then
+    CREDS_TMPFILE="$(mktemp)"
+    chmod 600 "$CREDS_TMPFILE"
+    echo "$CREDS_JSON" > "$CREDS_TMPFILE"
+    ARGS+=(-v "$CREDS_TMPFILE:$CONTAINER_HOME/.claude/.credentials.json")
+  fi
+fi
+
 "$RUNTIME" "${ARGS[@]}" "$IMAGE" --dangerously-skip-permissions "$@"
