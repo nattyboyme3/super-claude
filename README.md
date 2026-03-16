@@ -29,31 +29,31 @@ If none is found, the script prints install instructions and exits.
 
 ## Setup
 
-### 1. Clone the repo
+### One-liner install (macOS, zsh)
 
 ```bash
-git clone https://github.com/nattyboyme3/super-claude.git
+git clone https://github.com/nattyboyme3/super-claude.git ~/super-claude && chmod +x ~/super-claude/claude-docker.sh && echo 'alias super-claude="$HOME/super-claude/claude-docker.sh"' >> ~/.zshrc && source ~/.zshrc
 ```
 
-### 2. Make the script executable
+This clones the repo to `~/super-claude`, makes the script executable, and adds the alias to your `~/.zshrc`. If you use bash, replace `~/.zshrc` with `~/.bashrc`.
 
-```bash
-chmod +x super-claude/claude-docker.sh
-```
+### Manual setup
 
-### 3. Alias it as `super-claude`
+1. Clone the repo:
+   ```bash
+   git clone https://github.com/nattyboyme3/super-claude.git ~/super-claude
+   chmod +x ~/super-claude/claude-docker.sh
+   ```
 
-Add this to your `~/.zshrc`, `~/.bashrc`, or equivalent:
+2. Add to your `~/.zshrc` or `~/.bashrc`:
+   ```bash
+   alias super-claude="$HOME/super-claude/claude-docker.sh"
+   ```
 
-```bash
-alias super-claude='/path/to/super-claude/claude-docker.sh'
-```
-
-Replace `/path/to/super-claude` with the actual path where you cloned the repo. Then reload your shell:
-
-```bash
-source ~/.zshrc   # or source ~/.bashrc
-```
+3. Reload your shell:
+   ```bash
+   source ~/.zshrc   # or source ~/.bashrc
+   ```
 
 ## Usage
 
