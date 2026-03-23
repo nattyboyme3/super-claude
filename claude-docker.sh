@@ -37,6 +37,14 @@ if [[ -z "$RUNTIME" ]]; then
   exit 1
 fi
 
+# Fix volume ownership: Docker creates named volumes as root-owned, but the
+# container runs as appuser (uid 1001). Chown the volume on every launch —
+# it's a no-op if ownership is already correct.
+"$RUNTIME" run --rm --user root \
+  --entrypoint sh \
+  -v super-claude-credentials:"$CONTAINER_HOME/.claude" \
+  "$IMAGE" -c "chown -R appuser:appuser $CONTAINER_HOME/.claude"
+
 ARGS=(
   run -it --rm
   --workdir "$WORKDIR"
