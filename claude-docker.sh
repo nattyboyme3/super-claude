@@ -59,6 +59,7 @@ ARGS=(
   --workdir "$WORKDIR"
   -v "$WORKDIR:$WORKDIR"
   -v super-claude-home:"$CONTAINER_HOME"
+  -p 3118:3118   # OAuth callback port — browser redirect must reach the container
 )
 
 if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
