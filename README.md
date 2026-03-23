@@ -7,7 +7,7 @@ Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with `--danger
 The script launches [`ghcr.io/gendosu/claude-code-docker`](https://github.com/gendosu/claude-code-docker) — a pre-built image with Claude Code and Node.js 22 installed — and:
 
 - Mounts your current working directory into the container at the same path
-- Uses a persistent Docker volume (`super-claude-home`) to store the container home directory — including Claude credentials — across runs
+- Uses a persistent Docker volume (`super-claude-data`) to store Claude credentials and config across runs, via `CLAUDE_CONFIG_DIR`
 - Runs `claude --dangerously-skip-permissions`
 
 Your files are edited directly on the host via the volume mount, so there's nothing to copy in or out.
@@ -73,7 +73,7 @@ Any additional arguments are forwarded directly to `claude`.
 
 ## Authentication
 
-Credentials are stored in a named Docker volume (`super-claude-home`) that persists between runs.
+Credentials are stored in a named Docker volume (`super-claude-data`) that persists between runs.
 
 **First run on a new machine:** Claude Code will prompt you to log in. After you authenticate, credentials are saved to the volume automatically.
 
@@ -83,7 +83,7 @@ Credentials are stored in a named Docker volume (`super-claude-home`) that persi
 
 **To log out or switch accounts:**
 ```bash
-docker volume rm super-claude-home
+docker volume rm super-claude-data
 ```
 
 **API key** — if `ANTHROPIC_API_KEY` is set in your environment, it will be passed into the container instead:

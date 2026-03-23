@@ -5,6 +5,13 @@ IMAGE="ghcr.io/gendosu/claude-code-docker:latest"
 WORKDIR="$(pwd)"
 CONTAINER_HOME="/home/appuser"
 
+# Claude Code respects CLAUDE_CONFIG_DIR for all credential and config storage
+# (both ~/.claude.json and ~/.claude/.credentials.json resolve under this dir).
+# Pointing it at a dedicated named volume keeps auth data completely separate
+# from the container's home directory — no home-dir seeding required.
+CLAUDE_DATA_MOUNT="/claude-data"
+CLAUDE_DATA_VOLUME="super-claude-data"
+
 # Detect available container runtime
 detect_runtime() {
   if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
@@ -40,26 +47,19 @@ fi
 # Always pull the latest image so Claude Code is up to date.
 "$RUNTIME" pull "$IMAGE"
 
-# Initialise the home-dir volume on first use:
-#   - Seed it with the image's /home/appuser skeleton (so .nodenv, .bashrc, etc.
-#     are present) if it hasn't been seeded yet (no .bashrc = fresh/old volume).
-#   - Fix ownership so appuser (uid 1001) can write to it.
-# Mounting at /mnt/home lets us still see the image's original /home/appuser
-# for the cp, then the main run mounts the volume at /home/appuser proper.
+# Ensure the data volume is owned by appuser (uid 1001).
+# Docker creates named volumes as root; this is a fast no-op after the first run.
 "$RUNTIME" run --rm --user root \
   --entrypoint sh \
-  -v super-claude-home:/mnt/home \
-  "$IMAGE" -c '
-    [ -f /mnt/home/.bashrc ] || cp -a /home/appuser/. /mnt/home/
-    chown -R appuser:appuser /mnt/home
-  '
+  -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT" \
+  "$IMAGE" -c "chown -R appuser:appuser $CLAUDE_DATA_MOUNT"
 
 ARGS=(
   run -it --rm
   --workdir "$WORKDIR"
   -v "$WORKDIR:$WORKDIR"
-  -v super-claude-home:"$CONTAINER_HOME"
-  -p 3118:3118   # OAuth callback port — browser redirect must reach the container
+  -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT"
+  -e "CLAUDE_CONFIG_DIR=$CLAUDE_DATA_MOUNT"
 )
 
 if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
