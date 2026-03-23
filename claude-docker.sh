@@ -37,6 +37,9 @@ if [[ -z "$RUNTIME" ]]; then
   exit 1
 fi
 
+# Always pull the latest image so Claude Code is up to date.
+"$RUNTIME" pull "$IMAGE"
+
 # Initialise the home-dir volume on first use:
 #   - Seed it with the image's /home/appuser skeleton (so .nodenv, .bashrc, etc.
 #     are present) if it hasn't been seeded yet (no .bashrc = fresh/old volume).
