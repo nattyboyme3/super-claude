@@ -37,19 +37,25 @@ if [[ -z "$RUNTIME" ]]; then
   exit 1
 fi
 
-# Fix volume ownership: Docker creates named volumes as root-owned, but the
-# container runs as appuser (uid 1001). Chown the volume on every launch —
-# it's a no-op if ownership is already correct.
+# Initialise the home-dir volume on first use:
+#   - Seed it with the image's /home/appuser skeleton (so .nodenv, .bashrc, etc.
+#     are present) if it hasn't been seeded yet (no .bashrc = fresh/old volume).
+#   - Fix ownership so appuser (uid 1001) can write to it.
+# Mounting at /mnt/home lets us still see the image's original /home/appuser
+# for the cp, then the main run mounts the volume at /home/appuser proper.
 "$RUNTIME" run --rm --user root \
   --entrypoint sh \
-  -v super-claude-credentials:"$CONTAINER_HOME/.claude" \
-  "$IMAGE" -c "chown -R appuser:appuser $CONTAINER_HOME/.claude"
+  -v super-claude-home:/mnt/home \
+  "$IMAGE" -c '
+    [ -f /mnt/home/.bashrc ] || cp -a /home/appuser/. /mnt/home/
+    chown -R appuser:appuser /mnt/home
+  '
 
 ARGS=(
   run -it --rm
   --workdir "$WORKDIR"
   -v "$WORKDIR:$WORKDIR"
-  -v super-claude-credentials:"$CONTAINER_HOME/.claude"
+  -v super-claude-home:"$CONTAINER_HOME"
 )
 
 if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
