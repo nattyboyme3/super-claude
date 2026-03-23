@@ -7,7 +7,7 @@ Run [Claude Code](https://docs.anthropic.com/en/docs/claude-code) with `--danger
 The script launches [`ghcr.io/gendosu/claude-code-docker`](https://github.com/gendosu/claude-code-docker) — a pre-built image with Claude Code and Node.js 22 installed — and:
 
 - Mounts your current working directory into the container at the same path
-- Passes your host Claude credentials into the container for authentication
+- Uses a persistent Docker volume (`super-claude-credentials`) to store Claude credentials across runs
 - Runs `claude --dangerously-skip-permissions`
 
 Your files are edited directly on the host via the volume mount, so there's nothing to copy in or out.
@@ -15,7 +15,6 @@ Your files are edited directly on the host via the volume mount, so there's noth
 ## Prerequisites
 
 - A supported container runtime (see below)
-- Claude Code authenticated on your host machine (run `claude` once to log in if you haven't)
 
 ## Supported container runtimes
 
@@ -74,9 +73,20 @@ Any additional arguments are forwarded directly to `claude`.
 
 ## Authentication
 
-**Claude.ai subscription (OAuth)** — the default. On macOS, Claude Code stores OAuth tokens in the Keychain rather than a plain file. The script extracts them automatically using the macOS `security` command, writes them to a `chmod 600` temp file, mounts it into the container as `~/.claude/.credentials.json`, and deletes it on exit. No manual setup needed.
+Credentials are stored in a named Docker volume (`super-claude-credentials`) that persists between runs.
 
-**API key** — if `ANTHROPIC_API_KEY` is set in your environment, it will be passed into the container:
+**First run on a new machine:** Claude Code will prompt you to log in. After you authenticate, credentials are saved to the volume automatically.
+
+**Subsequent runs:** credentials are reused — no login needed.
+
+**Different machine:** each machine has its own volume, so you'll log in once per machine.
+
+**To log out or switch accounts:**
+```bash
+docker volume rm super-claude-credentials
+```
+
+**API key** — if `ANTHROPIC_API_KEY` is set in your environment, it will be passed into the container instead:
 
 ```bash
 export ANTHROPIC_API_KEY=sk-ant-...
