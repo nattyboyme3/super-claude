@@ -12,6 +12,13 @@ CONTAINER_HOME="/home/appuser"
 CLAUDE_DATA_MOUNT="/claude-data"
 CLAUDE_DATA_VOLUME="super-claude-data"
 
+# The image ships with a pinned Claude Code version; we keep the live package
+# in its own volume so updates survive between runs. The volume is mounted at
+# the @anthropic-ai parent (not the package dir itself) so npm's atomic rename
+# can complete without EBUSY errors.
+CLAUDE_PKG_PATH="/usr/local/lib/node_modules/@anthropic-ai"
+CLAUDE_PKG_VOLUME="super-claude-pkg"
+
 # Detect available container runtime
 detect_runtime() {
   if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
@@ -47,18 +54,25 @@ fi
 # Always pull the latest image so Claude Code is up to date.
 "$RUNTIME" pull "$IMAGE"
 
-# Ensure the data volume is owned by appuser (uid 1001).
-# Docker creates named volumes as root; this is a fast no-op after the first run.
+# Run as root to: (1) update Claude Code to the latest published version,
+# and (2) fix ownership on the data volume so appuser can write to it.
+# The package volume persists the update across runs; the chown is a no-op
+# after the first launch.
 "$RUNTIME" run --rm --user root \
   --entrypoint sh \
   -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT" \
-  "$IMAGE" -c "chown -R appuser:appuser $CLAUDE_DATA_MOUNT"
+  -v "$CLAUDE_PKG_VOLUME:$CLAUDE_PKG_PATH" \
+  "$IMAGE" -c "
+    npm install -g @anthropic-ai/claude-code@latest --no-fund --no-audit --quiet
+    chown -R appuser:appuser $CLAUDE_DATA_MOUNT
+  "
 
 ARGS=(
   run -it --rm
   --workdir "$WORKDIR"
   -v "$WORKDIR:$WORKDIR"
   -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT"
+  -v "$CLAUDE_PKG_VOLUME:$CLAUDE_PKG_PATH"
   -e "CLAUDE_CONFIG_DIR=$CLAUDE_DATA_MOUNT"
 )
 
