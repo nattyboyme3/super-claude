@@ -12,12 +12,6 @@ CONTAINER_HOME="/home/appuser"
 CLAUDE_DATA_MOUNT="/claude-data"
 CLAUDE_DATA_VOLUME="super-claude-data"
 
-# The native installer places the claude binary at ~/.local/bin/claude.
-# We persist this directory in a volume so the binary survives between runs
-# and updates don't require a full image pull.
-CLAUDE_BIN_PATH="/home/appuser/.local/bin"
-CLAUDE_BIN_VOLUME="super-claude-bin"
-
 # Detect available container runtime
 detect_runtime() {
   if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
@@ -50,29 +44,26 @@ if [[ -z "$RUNTIME" ]]; then
   exit 1
 fi
 
-# Always pull the latest image so Claude Code is up to date.
-"$RUNTIME" pull "$IMAGE"
+# Pull only if a newer image exists; --quiet suppresses the digest noise.
+CURRENT_ID="$("$RUNTIME" inspect --format='{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+"$RUNTIME" pull --quiet "$IMAGE"
+NEW_ID="$("$RUNTIME" inspect --format='{{.Id}}' "$IMAGE")"
+if [[ "$CURRENT_ID" != "$NEW_ID" ]]; then
+  NEW_VERSION="$("$RUNTIME" run --rm --entrypoint sh "$IMAGE" -c 'claude --version' 2>/dev/null)"
+  echo "Updated to $NEW_VERSION"
+fi
 
-# Run setup as root to fix ownership on the data volume, then update
-# Claude Code to latest using the official native installer (run as appuser).
-# The bin volume persists the update across runs; both chown and the installer
-# are no-ops if nothing has changed.
+# Fix ownership on the data volume so appuser can write credentials.
 "$RUNTIME" run --rm --user root \
   --entrypoint sh \
   -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT" \
   "$IMAGE" -c "chown -R appuser:appuser $CLAUDE_DATA_MOUNT"
-
-"$RUNTIME" run --rm --user appuser \
-  --entrypoint sh \
-  -v "$CLAUDE_BIN_VOLUME:$CLAUDE_BIN_PATH" \
-  "$IMAGE" -c "curl -fsSL https://claude.ai/install.sh | bash"
 
 ARGS=(
   run -it --rm
   --workdir "$WORKDIR"
   -v "$WORKDIR:$WORKDIR"
   -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT"
-  -v "$CLAUDE_BIN_VOLUME:$CLAUDE_BIN_PATH"
   -e "CLAUDE_CONFIG_DIR=$CLAUDE_DATA_MOUNT"
 )
 
