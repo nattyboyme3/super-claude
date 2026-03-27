@@ -39,21 +39,19 @@ esac
 clog "callback_port=$CALLBACK_PORT"
 
 # Start a Node.js TCP bridge: fixed published port -> Claude's ephemeral callback port.
-# Using Node.js (not socat) so multiple connections are handled natively — a Docker
-# Desktop port probe won't consume the bridge's single connection slot.
+# Pre-connects to Claude's server immediately on both 127.0.0.1 (IPv4) and ::1 (IPv6)
+# because node:lts-bookworm-slim may bind 'localhost' to ::1, making IPv4-only connects
+# fail with ECONNREFUSED. Dumps /proc/net/tcp6 on give-up so we can see where Claude bound.
 if [ -n "$CALLBACK_PORT" ] && [ "$CALLBACK_PORT" != "$FIXED_PORT" ]; then
     node -e "
 const net = require('net');
+const fs  = require('fs');
 const FIXED = $FIXED_PORT, CB = $CALLBACK_PORT;
 const debug = process.env.SUPER_CLAUDE_DEBUG === '1';
-const log = msg => { if (debug) require('fs').appendFileSync('$LOG', '[bridge] ' + msg + '\n'); };
+const log = msg => { if (debug) fs.appendFileSync('$LOG', '[bridge] ' + msg + '\n'); };
 
-// Pre-connect to Claude's callback server IMMEDIATELY so the connection
-// exists before Claude's server stops accepting new ones (~5s timeout).
-// Node.js server.close() stops accepting NEW connections but keeps existing
-// ones alive -- our pre-established socket survives the listener shutdown.
-let held = null;      // pre-established connection to Claude
-let waiting = null;   // browser client that arrived before held was ready
+let held    = null;  // pre-established connection to Claude
+let waiting = null;  // browser client queued before held was ready
 
 function splice(a, b) {
   a.pipe(b); b.pipe(a);
@@ -64,18 +62,38 @@ function splice(a, b) {
 }
 
 function preConnect(retries) {
-  const t = net.createConnection(CB, '127.0.0.1');
-  t.on('connect', () => {
-    log('pre-connected to :' + CB + ' (held open, retries left=' + retries + ')');
-    held = t;
-    if (waiting) { log('wiring waiting client'); splice(waiting, held); waiting = null; held = null; }
+  // Try both IPv4 and IPv6 loopback simultaneously; first to connect wins
+  const addrs = ['127.0.0.1', '::1'];
+  let failures = 0;
+  let won = false;
+
+  addrs.forEach(addr => {
+    const t = net.createConnection(CB, addr);
+    t.on('connect', () => {
+      if (won) { t.destroy(); return; }
+      won = true;
+      log('pre-connected to ' + addr + ':' + CB + ' (retries left=' + retries + ')');
+      held = t;
+      t.on('close', () => { if (held === t) { held = null; log('pre-connection closed'); } });
+      if (waiting) { log('wiring waiting client'); splice(waiting, held); waiting = null; held = null; }
+    });
+    t.on('error', e => {
+      log('pre-connect ' + addr + ':' + CB + ' error: ' + e.message);
+      if (won) return;
+      failures++;
+      if (failures < addrs.length) return; // wait for the other address to resolve
+      // Both addresses failed this round
+      if (retries > 0) {
+        setTimeout(() => preConnect(retries - 1), 200);
+      } else {
+        log('gave up connecting to :' + CB + ' on both 127.0.0.1 and ::1');
+        // Dump listening sockets so we can see where Claude actually bound
+        ['tcp', 'tcp6'].forEach(f => {
+          try { log('/proc/net/' + f + ':\n' + fs.readFileSync('/proc/net/' + f, 'utf8')); } catch(_) {}
+        });
+      }
+    });
   });
-  t.on('error', e => {
-    log('pre-connect error: ' + e.message + ' (retries left=' + retries + ')');
-    if (retries > 0) setTimeout(() => preConnect(retries - 1), 200);
-    else log('gave up pre-connecting');
-  });
-  t.on('close', () => { if (held === t) held = null; log('pre-connection closed'); });
 }
 preConnect(25); // retry for up to ~5 seconds
 
@@ -109,12 +127,8 @@ else
 fi
 
 # Do NOT return immediately. Claude starts a shutdown timer for its OAuth callback
-# server when xdg-open exits. A real browser launcher takes several seconds to
-# return; ours exits in ~50ms, which causes Claude to shut down the server before
-# the browser can complete the OAuth redirect.
-#
-# Block here until the host proxy signals completion (writes 'done' to the IPC dir),
-# or until a 120-second safety timeout, whichever comes first.
+# server when xdg-open exits. Block until the host proxy signals completion
+# (writes oauth-done to the IPC dir), or 120-second safety timeout.
 clog "xdg-open blocking until callback completes (max 120s)"
 i=0
 while [ $i -lt 240 ]; do
