@@ -47,15 +47,48 @@ const net = require('net');
 const FIXED = $FIXED_PORT, CB = $CALLBACK_PORT;
 const debug = process.env.SUPER_CLAUDE_DEBUG === '1';
 const log = msg => { if (debug) require('fs').appendFileSync('$LOG', '[bridge] ' + msg + '\n'); };
+
+// Pre-connect to Claude's callback server IMMEDIATELY so the connection
+// exists before Claude's server stops accepting new ones (~5s timeout).
+// Node.js server.close() stops accepting NEW connections but keeps existing
+// ones alive -- our pre-established socket survives the listener shutdown.
+let held = null;      // pre-established connection to Claude
+let waiting = null;   // browser client that arrived before held was ready
+
+function splice(a, b) {
+  a.pipe(b); b.pipe(a);
+  a.on('error', () => b.destroy());
+  b.on('error', () => a.destroy());
+  a.on('close', () => log('client side closed'));
+  b.on('close', () => log('claude side closed'));
+}
+
+function preConnect(retries) {
+  const t = net.createConnection(CB, '127.0.0.1');
+  t.on('connect', () => {
+    log('pre-connected to :' + CB + ' (held open, retries left=' + retries + ')');
+    held = t;
+    if (waiting) { log('wiring waiting client'); splice(waiting, held); waiting = null; held = null; }
+  });
+  t.on('error', e => {
+    log('pre-connect error: ' + e.message + ' (retries left=' + retries + ')');
+    if (retries > 0) setTimeout(() => preConnect(retries - 1), 200);
+    else log('gave up pre-connecting');
+  });
+  t.on('close', () => { if (held === t) held = null; log('pre-connection closed'); });
+}
+preConnect(25); // retry for up to ~5 seconds
+
 net.createServer(client => {
-  log('client connected, opening :' + CB);
-  const target = net.createConnection(CB, '127.0.0.1', () => log('connected to :' + CB));
-  client.pipe(target);
-  target.pipe(client);
-  target.on('error', e => { log('target error: ' + e.message); client.destroy(); });
-  client.on('error', e => { log('client error: ' + e.message); target.destroy(); });
-  target.on('close', () => log('target :' + CB + ' closed'));
-  client.on('close', () => log('client closed'));
+  log('browser client arrived');
+  if (held && !held.destroyed) {
+    log('using pre-established connection');
+    splice(client, held);
+    held = null;
+  } else {
+    log('held connection not ready, queuing client');
+    waiting = client;
+  }
 }).listen(FIXED, '0.0.0.0', () => log('bridge ready :' + FIXED + ' -> :' + CB));
 " 2>>"$LOG" &
     clog "node bridge started (pid=$!): :$FIXED_PORT -> :$CALLBACK_PORT"
