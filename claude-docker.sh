@@ -44,6 +44,42 @@ if [[ -z "$RUNTIME" ]]; then
   exit 1
 fi
 
+# IPC dir for browser URL passthrough.
+# The container's fake xdg-open writes URLs here; the watcher below reads
+# them and opens the real browser on the host.
+# Use /tmp (not mktemp -d) so it's always within Docker Desktop's file-share
+# allowlist on macOS; suffix with PID to avoid collisions.
+IPC_DIR="/tmp/super-claude-ipc-$$"
+mkdir -p "$IPC_DIR"
+WATCHER_PID=""
+
+cleanup() {
+  [[ -n "$WATCHER_PID" ]] && kill "$WATCHER_PID" 2>/dev/null || true
+  rm -rf "$IPC_DIR"
+}
+trap cleanup EXIT INT TERM
+
+# Detect the host's browser-open command
+if [[ "$(uname)" == "Darwin" ]]; then
+  HOST_OPEN="open"
+else
+  HOST_OPEN="xdg-open"
+fi
+
+# Background watcher: polls every 0.3 s for a URL written by xdg-open inside
+# the container, then opens it in the host browser.
+(
+  while true; do
+    if [[ -f "$IPC_DIR/open-url" ]]; then
+      URL="$(cat "$IPC_DIR/open-url")"
+      rm -f "$IPC_DIR/open-url"
+      [[ -n "$URL" ]] && "$HOST_OPEN" "$URL" 2>/dev/null || true
+    fi
+    sleep 0.3
+  done
+) &
+WATCHER_PID=$!
+
 # Pull only if a newer image exists; --quiet suppresses the digest noise.
 CURRENT_ID="$("$RUNTIME" inspect --format='{{.Id}}' "$IMAGE" 2>/dev/null || true)"
 "$RUNTIME" pull --quiet "$IMAGE"
@@ -65,6 +101,7 @@ ARGS=(
   -v "$WORKDIR:$WORKDIR"
   -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT"
   -e "CLAUDE_CONFIG_DIR=$CLAUDE_DATA_MOUNT"
+  -v "$IPC_DIR:/tmp/sc-ipc"
 )
 
 if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then

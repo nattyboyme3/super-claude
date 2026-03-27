@@ -6,6 +6,12 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
+# Fake browser opener: intercepts xdg-open calls from Claude Code and writes
+# the URL to a shared IPC dir so the host launch script can open it in the
+# real browser.  Must be installed as root before switching to appuser.
+COPY browser-open.sh /usr/local/bin/xdg-open
+RUN chmod +x /usr/local/bin/xdg-open
+
 # Create non-root user
 RUN useradd -m -s /bin/bash appuser
 
