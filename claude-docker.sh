@@ -118,15 +118,18 @@ def dlog(msg):
         f.write(f'[{datetime.now().strftime("%H:%M:%S.%f")[:12]}] proxy: {msg}\n')
 
 def relay(src, dst, direction):
+    total = 0
     try:
         while True:
             data = src.recv(4096)
             if not data:
+                dlog(f'{direction} EOF after {total} bytes')
                 break
             dst.sendall(data)
-            dlog(f'{direction} {len(data)} bytes')
+            total += len(data)
+            dlog(f'{direction} {len(data)} bytes ({total} total)')
     except Exception as e:
-        dlog(f'{direction} relay ended: {e}')
+        dlog(f'{direction} relay ended after {total} bytes: {e}')
     finally:
         for s in (src, dst):
             try:

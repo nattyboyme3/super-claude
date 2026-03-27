@@ -3,11 +3,12 @@
 #
 # Claude Code picks an ephemeral callback port at runtime.  This script:
 #   1. Extracts that port from the redirect_uri in the auth URL
-#   2. Starts a socat bridge inside the container: FIXED_PORT -> ephemeral port
-#   3. Writes the original URL (unmodified) and the callback port to the IPC dir
-#      so the host script can start a matching proxy on the host side
+#   2. Starts a Node.js TCP bridge: FIXED_PORT -> ephemeral port
+#      (handles multiple connections, so Docker port probes don't consume it)
+#   3. Writes the original URL and callback port to the IPC dir so the
+#      host script can start a matching host-side proxy
 #
-# When SUPER_CLAUDE_DEBUG=1, all events are timestamped to /tmp/sc-ipc/container.log
+# When SUPER_CLAUDE_DEBUG=1, events are timestamped to /tmp/sc-ipc/container.log
 
 URL="$1"
 FIXED_PORT=54321
@@ -15,8 +16,8 @@ IPC_DIR="/tmp/sc-ipc"
 LOG="$IPC_DIR/container.log"
 
 clog() {
-    [ "${SUPER_CLAUDE_DEBUG:-0}" = "1" ] || return 0
     [ -d "$IPC_DIR" ] || return 0
+    [ "${SUPER_CLAUDE_DEBUG:-0}" = "1" ] || return 0
     printf '[%s] %s\n' "$(date '+%T')" "$*" >> "$LOG"
 }
 
@@ -37,19 +38,35 @@ esac
 
 clog "callback_port=$CALLBACK_PORT"
 
-# Start container-side socat: fixed published port -> Claude's ephemeral callback port.
+# Start a Node.js TCP bridge: fixed published port -> Claude's ephemeral callback port.
+# Using Node.js (not socat) so multiple connections are handled natively — a Docker
+# Desktop port probe won't consume the bridge's single connection slot.
 if [ -n "$CALLBACK_PORT" ] && [ "$CALLBACK_PORT" != "$FIXED_PORT" ]; then
-    socat TCP-LISTEN:${FIXED_PORT},reuseaddr TCP:127.0.0.1:${CALLBACK_PORT} >/dev/null 2>&1 &
-    SOCAT_PID=$!
-    clog "socat bridge started (pid=$SOCAT_PID): :$FIXED_PORT -> :$CALLBACK_PORT"
+    node -e "
+const net = require('net');
+const FIXED = $FIXED_PORT, CB = $CALLBACK_PORT;
+const debug = process.env.SUPER_CLAUDE_DEBUG === '1';
+const log = msg => { if (debug) require('fs').appendFileSync('$LOG', '[bridge] ' + msg + '\n'); };
+net.createServer(client => {
+  log('client connected, opening :' + CB);
+  const target = net.createConnection(CB, '127.0.0.1', () => log('connected to :' + CB));
+  client.pipe(target);
+  target.pipe(client);
+  target.on('error', e => { log('target error: ' + e.message); client.destroy(); });
+  client.on('error', e => { log('client error: ' + e.message); target.destroy(); });
+  target.on('close', () => log('target :' + CB + ' closed'));
+  client.on('close', () => log('client closed'));
+}).listen(FIXED, '0.0.0.0', () => log('bridge ready :' + FIXED + ' -> :' + CB));
+" 2>>"$LOG" &
+    clog "node bridge started (pid=$!): :$FIXED_PORT -> :$CALLBACK_PORT"
 else
-    clog "WARNING: no callback port extracted, socat not started"
+    clog "WARNING: no callback port extracted, bridge not started"
 fi
 
 # Always print to stderr so the user can copy it manually if needed
 printf '\n[super-claude] Open this URL in your browser:\n  %s\n\n' "$URL" >&2
 
-# Signal the host watcher: write callback port first (watcher reads URL last as trigger)
+# Signal the host watcher: write callback port first, URL last (URL is the trigger)
 if [ -d "$IPC_DIR" ]; then
     [ -n "$CALLBACK_PORT" ] && printf '%s' "$CALLBACK_PORT" > "$IPC_DIR/callback-port"
     printf '%s' "$URL" > "$IPC_DIR/open-url"
