@@ -3,16 +3,41 @@ set -euo pipefail
 
 IMAGE="ghcr.io/nattyboyme3/super-claude:latest"
 WORKDIR="$(pwd)"
-CONTAINER_HOME="/home/appuser"
 
-# Claude Code respects CLAUDE_CONFIG_DIR for all credential and config storage
-# (both ~/.claude.json and ~/.claude/.credentials.json resolve under this dir).
-# Pointing it at a dedicated named volume keeps auth data completely separate
-# from the container's home directory — no home-dir seeding required.
 CLAUDE_DATA_MOUNT="/claude-data"
 CLAUDE_DATA_VOLUME="super-claude-data"
 
-# Detect available container runtime
+# ---------------------------------------------------------------------------
+# Debug logging — enable with: super-claude --debug [args...]
+# Log is written to ~/.super-claude-debug.log and also echoed to stderr.
+# ---------------------------------------------------------------------------
+DEBUG=0
+DEBUG_LOG="$HOME/.super-claude-debug.log"
+PASSTHROUGH_ARGS=()
+for arg in "$@"; do
+  if [[ "$arg" == "--debug" ]]; then
+    DEBUG=1
+  else
+    PASSTHROUGH_ARGS+=("$arg")
+  fi
+done
+set -- "${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}"
+
+dlog() {
+  [[ "$DEBUG" == "0" ]] && return
+  printf '[%s] %s\n' "$(date '+%T.%3N')" "$*" | tee -a "$DEBUG_LOG" >&2
+}
+
+if [[ "$DEBUG" == "1" ]]; then
+  : > "$DEBUG_LOG"
+  dlog "=== super-claude debug session ==="
+  dlog "image=$IMAGE"
+  dlog "workdir=$WORKDIR"
+fi
+
+# ---------------------------------------------------------------------------
+# Container runtime detection
+# ---------------------------------------------------------------------------
 detect_runtime() {
   if command -v docker &>/dev/null && docker info &>/dev/null 2>&1; then
     echo "docker"
@@ -44,43 +69,64 @@ if [[ -z "$RUNTIME" ]]; then
   exit 1
 fi
 
-# IPC dir for browser URL passthrough.
+dlog "runtime=$RUNTIME"
+
+# ---------------------------------------------------------------------------
+# IPC dir for browser URL / OAuth callback passthrough.
 # On macOS /tmp is a symlink to /private/tmp; Docker Desktop resolves bind
 # mounts against the real path, so we must use /private/tmp explicitly.
-# On Linux /tmp is already the real path.
+# ---------------------------------------------------------------------------
 if [[ "$(uname)" == "Darwin" ]]; then
   IPC_DIR="/private/tmp/super-claude-ipc-$$"
 else
   IPC_DIR="/tmp/super-claude-ipc-$$"
 fi
 mkdir -p "$IPC_DIR"
+dlog "ipc_dir=$IPC_DIR"
+
 WATCHER_PID=""
 
 cleanup() {
-  # Kill the host-side OAuth proxy if one was started
   if [[ -f "$IPC_DIR/proxy.pid" ]]; then
     kill "$(cat "$IPC_DIR/proxy.pid")" 2>/dev/null || true
   fi
   [[ -n "$WATCHER_PID" ]] && kill "$WATCHER_PID" 2>/dev/null || true
+  # Flush container log into debug log before removing IPC dir
+  if [[ "$DEBUG" == "1" ]] && [[ -f "$IPC_DIR/container.log" ]]; then
+    while IFS= read -r line; do
+      printf '[container] %s\n' "$line" >> "$DEBUG_LOG"
+    done < "$IPC_DIR/container.log"
+  fi
   rm -rf "$IPC_DIR"
 }
 trap cleanup EXIT INT TERM
 
-# Write the host-side OAuth proxy script to the IPC dir.
-# It listens on the callback port the browser expects, and forwards traffic
-# through Docker's published port (54321) into the container.
+# ---------------------------------------------------------------------------
+# Host-side OAuth proxy script — written to IPC dir so the watcher can use
+# it without any extra files in the repo.  Logs to debug log if provided.
+# ---------------------------------------------------------------------------
 cat > "$IPC_DIR/oauth-proxy.py" << 'PYEOF'
-import socket, threading, sys
+import socket, threading, sys, os
+from datetime import datetime
 
-def relay(src, dst):
+log_file = sys.argv[3] if len(sys.argv) > 3 else None
+
+def dlog(msg):
+    if not log_file:
+        return
+    with open(log_file, 'a') as f:
+        f.write(f'[{datetime.now().strftime("%H:%M:%S.%f")[:12]}] proxy: {msg}\n')
+
+def relay(src, dst, direction):
     try:
         while True:
             data = src.recv(4096)
             if not data:
                 break
             dst.sendall(data)
-    except:
-        pass
+            dlog(f'{direction} {len(data)} bytes')
+    except Exception as e:
+        dlog(f'{direction} relay ended: {e}')
     finally:
         for s in (src, dst):
             try:
@@ -95,70 +141,113 @@ server = socket.socket()
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(('127.0.0.1', listen_port))
 server.listen(1)
-conn, _ = server.accept()
+dlog(f'listening on :{listen_port}, will forward to :{target_port}')
+
+conn, addr = server.accept()
+dlog(f'accepted connection from {addr}')
+
 target = socket.socket()
 target.connect(('127.0.0.1', target_port))
+dlog(f'connected to :{target_port}')
 
-t1 = threading.Thread(target=relay, args=(conn, target), daemon=True)
-t2 = threading.Thread(target=relay, args=(target, conn), daemon=True)
+t1 = threading.Thread(target=relay, args=(conn, target, 'browser->claude'), daemon=True)
+t2 = threading.Thread(target=relay, args=(target, conn, 'claude->browser'), daemon=True)
 t1.start()
 t2.start()
 t1.join()
 t2.join()
+dlog('proxy done')
 PYEOF
 
-# Detect the host's browser-open command
+# ---------------------------------------------------------------------------
+# Host browser opener
+# ---------------------------------------------------------------------------
 if [[ "$(uname)" == "Darwin" ]]; then
   HOST_OPEN="open"
 else
   HOST_OPEN="xdg-open"
 fi
 
-# Background watcher: polls every 0.3 s for a URL written by xdg-open inside
-# the container.  If a callback port was also signalled, starts a host-side
-# TCP proxy (callback_port -> 54321) so the browser's OAuth redirect reaches
-# the container without any URL rewriting.
+# ---------------------------------------------------------------------------
+# Background watcher: detects URLs + callback ports written by the container's
+# xdg-open shim, starts the host-side proxy, then opens the browser.
+# Also relays container log lines to the debug log in real time.
+# ---------------------------------------------------------------------------
 (
+  CONTAINER_LOG_POS=0
   while true; do
+
+    # Relay any new container log lines to the debug log
+    if [[ "$DEBUG" == "1" ]] && [[ -f "$IPC_DIR/container.log" ]]; then
+      LINES=$(wc -l < "$IPC_DIR/container.log")
+      if (( LINES > CONTAINER_LOG_POS )); then
+        tail -n "+$((CONTAINER_LOG_POS + 1))" "$IPC_DIR/container.log" | \
+          while IFS= read -r line; do
+            printf '[%s] [container] %s\n' "$(date '+%T.%3N')" "$line" >> "$DEBUG_LOG"
+          done
+        CONTAINER_LOG_POS=$LINES
+      fi
+    fi
+
     if [[ -f "$IPC_DIR/open-url" ]]; then
       URL="$(cat "$IPC_DIR/open-url")"
       rm -f "$IPC_DIR/open-url"
+      dlog "open-url received"
 
-      # Start host-side proxy if the container signalled a callback port
       if [[ -f "$IPC_DIR/callback-port" ]]; then
         CALLBACK_PORT="$(cat "$IPC_DIR/callback-port")"
         rm -f "$IPC_DIR/callback-port"
+        dlog "callback-port=$CALLBACK_PORT"
+
         if [[ -n "$CALLBACK_PORT" ]]; then
-          python3 "$IPC_DIR/oauth-proxy.py" "$CALLBACK_PORT" 54321 &
+          PROXY_ARGS=("$CALLBACK_PORT" 54321)
+          [[ "$DEBUG" == "1" ]] && PROXY_ARGS+=("$DEBUG_LOG")
+          python3 "$IPC_DIR/oauth-proxy.py" "${PROXY_ARGS[@]}" &
           echo $! > "$IPC_DIR/proxy.pid"
+          dlog "host proxy started (pid=$!), listening on :$CALLBACK_PORT"
         fi
       fi
 
-      [[ -n "$URL" ]] && "$HOST_OPEN" "$URL" 2>/dev/null || true
+      if [[ -n "$URL" ]]; then
+        dlog "opening browser: $URL"
+        "$HOST_OPEN" "$URL" 2>/dev/null || true
+        dlog "browser open command returned"
+      fi
     fi
+
     sleep 0.3
   done
 ) &
 WATCHER_PID=$!
+dlog "watcher started (pid=$WATCHER_PID)"
 
-# Pull only if a newer image exists; --quiet suppresses the digest noise.
+# ---------------------------------------------------------------------------
+# Pull image if newer version available
+# ---------------------------------------------------------------------------
+dlog "checking for image updates"
 CURRENT_ID="$("$RUNTIME" inspect --format='{{.Id}}' "$IMAGE" 2>/dev/null || true)"
 "$RUNTIME" pull --quiet "$IMAGE"
 NEW_ID="$("$RUNTIME" inspect --format='{{.Id}}' "$IMAGE")"
 if [[ "$CURRENT_ID" != "$NEW_ID" ]]; then
   NEW_VERSION="$("$RUNTIME" run --rm --entrypoint sh "$IMAGE" -c 'claude --version' 2>/dev/null)"
   echo "Updated to $NEW_VERSION"
+  dlog "image updated to $NEW_VERSION"
 fi
 
-# Fix ownership on the data volume and IPC dir so appuser can write to both.
-# The IPC dir bind-mount appears as root:root inside the Linux VM on macOS
-# regardless of host permissions, so we must chmod it from the Linux side.
+# ---------------------------------------------------------------------------
+# Fix volume/IPC dir ownership from the Linux side
+# ---------------------------------------------------------------------------
+dlog "fixing volume permissions"
 "$RUNTIME" run --rm --user root \
   --entrypoint sh \
   -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT" \
   -v "$IPC_DIR:/tmp/sc-ipc" \
   "$IMAGE" -c "chown -R appuser:appuser $CLAUDE_DATA_MOUNT && chmod 777 /tmp/sc-ipc"
+dlog "permissions fixed, launching container"
 
+# ---------------------------------------------------------------------------
+# Launch Claude
+# ---------------------------------------------------------------------------
 ARGS=(
   run -it --rm
   --workdir "$WORKDIR"
@@ -169,8 +258,7 @@ ARGS=(
   -p 54321:54321
 )
 
-if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-  ARGS+=(-e ANTHROPIC_API_KEY)
-fi
+[[ "$DEBUG" == "1" ]]         && ARGS+=(-e SUPER_CLAUDE_DEBUG=1)
+[[ -n "${ANTHROPIC_API_KEY:-}" ]] && ARGS+=(-e ANTHROPIC_API_KEY)
 
 "$RUNTIME" "${ARGS[@]}" "$IMAGE" --dangerously-skip-permissions "$@"

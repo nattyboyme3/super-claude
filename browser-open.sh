@@ -4,17 +4,24 @@
 # Claude Code picks an ephemeral callback port at runtime.  This script:
 #   1. Extracts that port from the redirect_uri in the auth URL
 #   2. Starts a socat bridge inside the container: FIXED_PORT -> ephemeral port
-#      (FIXED_PORT is published to the host via docker -p so Docker can forward
-#       traffic from the host-side proxy into the container)
 #   3. Writes the original URL (unmodified) and the callback port to the IPC dir
 #      so the host script can start a matching proxy on the host side
 #
-# The host script then listens on the original callback port, forwarding through
-# FIXED_PORT into the container — the browser uses the unmodified URL and
-# Claude's server sees exactly the Host header it registered.
+# When SUPER_CLAUDE_DEBUG=1, all events are timestamped to /tmp/sc-ipc/container.log
 
 URL="$1"
 FIXED_PORT=54321
+IPC_DIR="/tmp/sc-ipc"
+LOG="$IPC_DIR/container.log"
+
+clog() {
+    [ "${SUPER_CLAUDE_DEBUG:-0}" = "1" ] || return 0
+    [ -d "$IPC_DIR" ] || return 0
+    printf '[%s] %s\n' "$(date '+%T')" "$*" >> "$LOG"
+}
+
+clog "xdg-open called"
+clog "url=$URL"
 
 # Extract callback port from redirect_uri.
 # Handles URL-encoded form (localhost%3APORT) and plain form (localhost:PORT).
@@ -28,17 +35,25 @@ case "$CALLBACK_PORT" in
     ''|*[!0-9]*) CALLBACK_PORT="" ;;
 esac
 
+clog "callback_port=$CALLBACK_PORT"
+
 # Start container-side socat: fixed published port -> Claude's ephemeral callback port.
-# No URL rewriting needed — the host-side proxy handles the routing transparently.
 if [ -n "$CALLBACK_PORT" ] && [ "$CALLBACK_PORT" != "$FIXED_PORT" ]; then
     socat TCP-LISTEN:${FIXED_PORT},reuseaddr TCP:127.0.0.1:${CALLBACK_PORT} >/dev/null 2>&1 &
+    SOCAT_PID=$!
+    clog "socat bridge started (pid=$SOCAT_PID): :$FIXED_PORT -> :$CALLBACK_PORT"
+else
+    clog "WARNING: no callback port extracted, socat not started"
 fi
 
 # Always print to stderr so the user can copy it manually if needed
 printf '\n[super-claude] Open this URL in your browser:\n  %s\n\n' "$URL" >&2
 
 # Signal the host watcher: write callback port first (watcher reads URL last as trigger)
-if [ -d /tmp/sc-ipc ]; then
-    [ -n "$CALLBACK_PORT" ] && printf '%s' "$CALLBACK_PORT" > /tmp/sc-ipc/callback-port
-    printf '%s' "$URL" > /tmp/sc-ipc/open-url
+if [ -d "$IPC_DIR" ]; then
+    [ -n "$CALLBACK_PORT" ] && printf '%s' "$CALLBACK_PORT" > "$IPC_DIR/callback-port"
+    printf '%s' "$URL" > "$IPC_DIR/open-url"
+    clog "ipc files written"
+else
+    clog "WARNING: IPC dir not mounted, cannot signal host"
 fi
