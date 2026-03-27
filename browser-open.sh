@@ -50,8 +50,8 @@ const FIXED = $FIXED_PORT, CB = $CALLBACK_PORT;
 const debug = process.env.SUPER_CLAUDE_DEBUG === '1';
 const log = msg => { if (debug) fs.appendFileSync('$LOG', '[bridge] ' + msg + '\n'); };
 
-let held    = null;  // pre-established connection to Claude
-let waiting = null;  // browser client queued before held was ready
+let held        = null;   // pre-established connection to Claude
+let keepPreconn = true;   // keep re-connecting until browser arrives
 
 function splice(a, b) {
   a.pipe(b); b.pipe(a);
@@ -74,8 +74,11 @@ function preConnect(retries) {
       won = true;
       log('pre-connected to ' + addr + ':' + CB + ' (retries left=' + retries + ')');
       held = t;
-      t.on('close', () => { if (held === t) { held = null; log('pre-connection closed'); } });
-      if (waiting) { log('wiring waiting client'); splice(waiting, held); waiting = null; held = null; }
+      t.on('close', () => {
+        if (held === t) { held = null; log('pre-connection closed'); }
+        // Re-establish immediately so there's always a fresh connection ready
+        if (keepPreconn) setTimeout(() => preConnect(25), 50);
+      });
     });
     t.on('error', e => {
       log('pre-connect ' + addr + ':' + CB + ' error: ' + e.message);
@@ -99,13 +102,34 @@ preConnect(25); // retry for up to ~5 seconds
 
 net.createServer(client => {
   log('browser client arrived');
+  keepPreconn = false;  // stop background pre-connect loop
   if (held && !held.destroyed) {
     log('using pre-established connection');
     splice(client, held);
     held = null;
   } else {
-    log('held connection not ready, queuing client');
-    waiting = client;
+    log('held connection not ready, connecting on-demand');
+    const addrs = ['::1', '127.0.0.1'];
+    let won = false;
+    let failures = 0;
+    addrs.forEach(addr => {
+      const t = net.createConnection(CB, addr);
+      t.on('connect', () => {
+        if (won) { t.destroy(); return; }
+        won = true;
+        log('on-demand connected to ' + addr + ':' + CB);
+        splice(client, t);
+      });
+      t.on('error', e => {
+        log('on-demand connect ' + addr + ':' + CB + ' error: ' + e.message);
+        if (won) return;
+        failures++;
+        if (failures === addrs.length) {
+          log('on-demand connect failed on all addresses, destroying client');
+          client.destroy();
+        }
+      });
+    });
   }
 }).listen(FIXED, '0.0.0.0', () => log('bridge ready :' + FIXED + ' -> :' + CB));
 " 2>>"$LOG" &
