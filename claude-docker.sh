@@ -160,6 +160,15 @@ t2.start()
 t1.join()
 t2.join()
 dlog('proxy done')
+
+# Signal xdg-open in the container to unblock and return, which lets
+# Claude proceed normally after the OAuth callback completes.
+ipc_dir = os.path.dirname(os.path.abspath(__file__))
+try:
+    open(os.path.join(ipc_dir, 'oauth-done'), 'w').close()
+    dlog('wrote oauth-done signal')
+except Exception as e:
+    dlog(f'could not write oauth-done: {e}')
 PYEOF
 
 # ---------------------------------------------------------------------------

@@ -74,3 +74,20 @@ if [ -d "$IPC_DIR" ]; then
 else
     clog "WARNING: IPC dir not mounted, cannot signal host"
 fi
+
+# Do NOT return immediately. Claude starts a shutdown timer for its OAuth callback
+# server when xdg-open exits. A real browser launcher takes several seconds to
+# return; ours exits in ~50ms, which causes Claude to shut down the server before
+# the browser can complete the OAuth redirect.
+#
+# Block here until the host proxy signals completion (writes 'done' to the IPC dir),
+# or until a 120-second safety timeout, whichever comes first.
+clog "xdg-open blocking until callback completes (max 120s)"
+i=0
+while [ $i -lt 240 ]; do
+    [ -f "$IPC_DIR/oauth-done" ] && break
+    sleep 0.5
+    i=$((i + 1))
+done
+clog "xdg-open unblocking (i=$i, done=$([ -f "$IPC_DIR/oauth-done" ] && echo yes || echo no))"
+rm -f "$IPC_DIR/oauth-done"
