@@ -4,6 +4,7 @@ RUN apt-get update && apt-get install -y \
     curl \
     git \
     ca-certificates \
+    socat \
     && rm -rf /var/lib/apt/lists/*
 
 # Fake browser opener: intercepts xdg-open calls from Claude Code and writes

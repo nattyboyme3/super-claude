@@ -102,6 +102,7 @@ ARGS=(
   -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT"
   -e "CLAUDE_CONFIG_DIR=$CLAUDE_DATA_MOUNT"
   -v "$IPC_DIR:/tmp/sc-ipc"
+  -p 54321:54321
 )
 
 if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
