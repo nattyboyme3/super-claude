@@ -1,10 +1,11 @@
-FROM debian:bookworm-slim
+FROM node:lts-bookworm-slim
 
 RUN apt-get update && apt-get install -y \
     curl \
     git \
     ca-certificates \
     socat \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Fake browser opener: intercepts xdg-open calls from Claude Code and writes

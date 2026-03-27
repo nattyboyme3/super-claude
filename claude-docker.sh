@@ -45,11 +45,14 @@ if [[ -z "$RUNTIME" ]]; then
 fi
 
 # IPC dir for browser URL passthrough.
-# The container's fake xdg-open writes URLs here; the watcher below reads
-# them and opens the real browser on the host.
-# Use /tmp (not mktemp -d) so it's always within Docker Desktop's file-share
-# allowlist on macOS; suffix with PID to avoid collisions.
-IPC_DIR="/tmp/super-claude-ipc-$$"
+# On macOS /tmp is a symlink to /private/tmp; Docker Desktop resolves bind
+# mounts against the real path, so we must use /private/tmp explicitly.
+# On Linux /tmp is already the real path.
+if [[ "$(uname)" == "Darwin" ]]; then
+  IPC_DIR="/private/tmp/super-claude-ipc-$$"
+else
+  IPC_DIR="/tmp/super-claude-ipc-$$"
+fi
 mkdir -p "$IPC_DIR"
 WATCHER_PID=""
 
@@ -147,11 +150,14 @@ if [[ "$CURRENT_ID" != "$NEW_ID" ]]; then
   echo "Updated to $NEW_VERSION"
 fi
 
-# Fix ownership on the data volume so appuser can write credentials.
+# Fix ownership on the data volume and IPC dir so appuser can write to both.
+# The IPC dir bind-mount appears as root:root inside the Linux VM on macOS
+# regardless of host permissions, so we must chmod it from the Linux side.
 "$RUNTIME" run --rm --user root \
   --entrypoint sh \
   -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT" \
-  "$IMAGE" -c "chown -R appuser:appuser $CLAUDE_DATA_MOUNT"
+  -v "$IPC_DIR:/tmp/sc-ipc" \
+  "$IMAGE" -c "chown -R appuser:appuser $CLAUDE_DATA_MOUNT && chmod 777 /tmp/sc-ipc"
 
 ARGS=(
   run -it --rm
