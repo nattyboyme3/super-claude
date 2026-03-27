@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="ghcr.io/gendosu/claude-code-docker:latest"
+IMAGE="ghcr.io/nattyboyme3/super-claude:latest"
 WORKDIR="$(pwd)"
 CONTAINER_HOME="/home/appuser"
 
@@ -12,12 +12,11 @@ CONTAINER_HOME="/home/appuser"
 CLAUDE_DATA_MOUNT="/claude-data"
 CLAUDE_DATA_VOLUME="super-claude-data"
 
-# The image ships with a pinned Claude Code version; we keep the live package
-# in its own volume so updates survive between runs. The volume is mounted at
-# the @anthropic-ai parent (not the package dir itself) so npm's atomic rename
-# can complete without EBUSY errors.
-CLAUDE_PKG_PATH="/usr/local/lib/node_modules/@anthropic-ai"
-CLAUDE_PKG_VOLUME="super-claude-pkg"
+# The native installer places the claude binary at ~/.local/bin/claude.
+# We persist this directory in a volume so the binary survives between runs
+# and updates don't require a full image pull.
+CLAUDE_BIN_PATH="/home/appuser/.local/bin"
+CLAUDE_BIN_VOLUME="super-claude-bin"
 
 # Detect available container runtime
 detect_runtime() {
@@ -54,25 +53,26 @@ fi
 # Always pull the latest image so Claude Code is up to date.
 "$RUNTIME" pull "$IMAGE"
 
-# Run as root to: (1) update Claude Code to the latest published version,
-# and (2) fix ownership on the data volume so appuser can write to it.
-# The package volume persists the update across runs; the chown is a no-op
-# after the first launch.
+# Run setup as root to fix ownership on the data volume, then update
+# Claude Code to latest using the official native installer (run as appuser).
+# The bin volume persists the update across runs; both chown and the installer
+# are no-ops if nothing has changed.
 "$RUNTIME" run --rm --user root \
   --entrypoint sh \
   -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT" \
-  -v "$CLAUDE_PKG_VOLUME:$CLAUDE_PKG_PATH" \
-  "$IMAGE" -c "
-    npm install -g @anthropic-ai/claude-code@latest --no-fund --no-audit --quiet
-    chown -R appuser:appuser $CLAUDE_DATA_MOUNT
-  "
+  "$IMAGE" -c "chown -R appuser:appuser $CLAUDE_DATA_MOUNT"
+
+"$RUNTIME" run --rm --user appuser \
+  --entrypoint sh \
+  -v "$CLAUDE_BIN_VOLUME:$CLAUDE_BIN_PATH" \
+  "$IMAGE" -c "curl -fsSL https://claude.ai/install.sh | bash"
 
 ARGS=(
   run -it --rm
   --workdir "$WORKDIR"
   -v "$WORKDIR:$WORKDIR"
   -v "$CLAUDE_DATA_VOLUME:$CLAUDE_DATA_MOUNT"
-  -v "$CLAUDE_PKG_VOLUME:$CLAUDE_PKG_PATH"
+  -v "$CLAUDE_BIN_VOLUME:$CLAUDE_BIN_PATH"
   -e "CLAUDE_CONFIG_DIR=$CLAUDE_DATA_MOUNT"
 )
 
