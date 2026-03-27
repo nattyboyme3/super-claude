@@ -54,10 +54,55 @@ mkdir -p "$IPC_DIR"
 WATCHER_PID=""
 
 cleanup() {
+  # Kill the host-side OAuth proxy if one was started
+  if [[ -f "$IPC_DIR/proxy.pid" ]]; then
+    kill "$(cat "$IPC_DIR/proxy.pid")" 2>/dev/null || true
+  fi
   [[ -n "$WATCHER_PID" ]] && kill "$WATCHER_PID" 2>/dev/null || true
   rm -rf "$IPC_DIR"
 }
 trap cleanup EXIT INT TERM
+
+# Write the host-side OAuth proxy script to the IPC dir.
+# It listens on the callback port the browser expects, and forwards traffic
+# through Docker's published port (54321) into the container.
+cat > "$IPC_DIR/oauth-proxy.py" << 'PYEOF'
+import socket, threading, sys
+
+def relay(src, dst):
+    try:
+        while True:
+            data = src.recv(4096)
+            if not data:
+                break
+            dst.sendall(data)
+    except:
+        pass
+    finally:
+        for s in (src, dst):
+            try:
+                s.close()
+            except:
+                pass
+
+listen_port = int(sys.argv[1])
+target_port = int(sys.argv[2])
+
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(('127.0.0.1', listen_port))
+server.listen(1)
+conn, _ = server.accept()
+target = socket.socket()
+target.connect(('127.0.0.1', target_port))
+
+t1 = threading.Thread(target=relay, args=(conn, target), daemon=True)
+t2 = threading.Thread(target=relay, args=(target, conn), daemon=True)
+t1.start()
+t2.start()
+t1.join()
+t2.join()
+PYEOF
 
 # Detect the host's browser-open command
 if [[ "$(uname)" == "Darwin" ]]; then
@@ -67,12 +112,25 @@ else
 fi
 
 # Background watcher: polls every 0.3 s for a URL written by xdg-open inside
-# the container, then opens it in the host browser.
+# the container.  If a callback port was also signalled, starts a host-side
+# TCP proxy (callback_port -> 54321) so the browser's OAuth redirect reaches
+# the container without any URL rewriting.
 (
   while true; do
     if [[ -f "$IPC_DIR/open-url" ]]; then
       URL="$(cat "$IPC_DIR/open-url")"
       rm -f "$IPC_DIR/open-url"
+
+      # Start host-side proxy if the container signalled a callback port
+      if [[ -f "$IPC_DIR/callback-port" ]]; then
+        CALLBACK_PORT="$(cat "$IPC_DIR/callback-port")"
+        rm -f "$IPC_DIR/callback-port"
+        if [[ -n "$CALLBACK_PORT" ]]; then
+          python3 "$IPC_DIR/oauth-proxy.py" "$CALLBACK_PORT" 54321 &
+          echo $! > "$IPC_DIR/proxy.pid"
+        fi
+      fi
+
       [[ -n "$URL" ]] && "$HOST_OPEN" "$URL" 2>/dev/null || true
     fi
     sleep 0.3
