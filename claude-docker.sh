@@ -270,7 +270,8 @@ ARGS=(
   -p 54321:54321
 )
 
-[[ "$DEBUG" == "1" ]]         && ARGS+=(-e SUPER_CLAUDE_DEBUG=1)
+[[ "$DEBUG" == "1" ]]             && ARGS+=(-e SUPER_CLAUDE_DEBUG=1)
 [[ -n "${ANTHROPIC_API_KEY:-}" ]] && ARGS+=(-e ANTHROPIC_API_KEY)
+ARGS+=(-e "SUPER_CLAUDE_HOST_OS=$(uname -s)/$(uname -m)")
 
 "$RUNTIME" "${ARGS[@]}" "$IMAGE" --dangerously-skip-permissions "$@"
